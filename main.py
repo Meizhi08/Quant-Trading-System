@@ -2493,5 +2493,108 @@ def risk_report():
     console.print()
 
 
+@app.command(name="ic-calibrate")
+def ic_calibrate(
+    start: str  = typer.Option("2023-01-01", help="回测开始日期（用于计算截面IC）"),
+    end: str    = typer.Option(str(date.today()), help="回测结束日期"),
+    lookback: int = typer.Option(6, help="用最近几期IC来平均（每期=rebalance_every天）"),
+    blend: float  = typer.Option(0.5, help="IC权重与默认权重的混合比例（0=纯默认，1=纯IC）"),
+    forward: int  = typer.Option(20, help="IC前瞻天数（与换仓周期对齐）"),
+    no_sample: bool = typer.Option(False, "--no-sample", help="用全量S&P500（慢）"),
+):
+    """
+    截面 Rank-IC 因子权重校准。
+
+    在历史数据上，每个换仓日对全量股票计算各因子排名 vs 未来收益排名的 Spearman 相关系数，
+    用平均 IC 重新校准因子权重，保存到 data/factor_weights.json。
+    下次运行任何选股命令时自动加载。
+    """
+    import random
+    import pandas as pd
+    from factor.engine import DEFAULT_WEIGHTS
+    from factor.ic_calibrator import ICCalibrator
+    from data.stock_selector import get_sp500_symbols
+
+    fetcher = DataFetcher(use_cache=True)
+
+    # ── 股票池 ─────────────────────────────────────────────────────────────────
+    console.print("[cyan]加载股票池...[/cyan]")
+    try:
+        all_syms = get_sp500_symbols()
+    except Exception:
+        all_syms = []
+    if not all_syms:
+        console.print("[red]获取 S&P500 列表失败[/red]")
+        raise typer.Exit(1)
+
+    if no_sample:
+        syms = all_syms
+    else:
+        syms = random.sample(all_syms, min(120, len(all_syms)))
+    console.print(f"[cyan]使用 {len(syms)} 只股票 ({start} → {end})[/cyan]")
+
+    # ── 价格数据 ───────────────────────────────────────────────────────────────
+    console.print("[cyan]下载价格数据（使用缓存）...[/cyan]")
+    stock_data: dict = {}
+    for i, sym in enumerate(syms):
+        try:
+            df = fetcher.get_kline(sym, start, end)
+            if df is not None and len(df) >= 80:
+                stock_data[sym] = df
+        except Exception:
+            pass
+        if (i + 1) % 50 == 0:
+            console.print(f"  {i+1}/{len(syms)} 完成...")
+
+    console.print(f"[cyan]有效股票: {len(stock_data)} 只[/cyan]")
+    if len(stock_data) < 30:
+        console.print("[red]有效股票不足30只，中止[/red]")
+        raise typer.Exit(1)
+
+    # ── 基本面数据 ─────────────────────────────────────────────────────────────
+    console.print("[cyan]下载基本面数据（使用缓存）...[/cyan]")
+    fund_map: dict = {}
+    for sym in stock_data:
+        try:
+            fund_map[sym] = fetcher.get_fundamentals(sym) or {}
+        except Exception:
+            fund_map[sym] = {}
+
+    # ── 截面 IC 校准 ───────────────────────────────────────────────────────────
+    console.print("[bold cyan]计算截面 Rank-IC...[/bold cyan]")
+    cal = ICCalibrator(stock_data, fund_map, forward_days=forward, rebalance_every=forward)
+    mean_ic = cal.calibrate(lookback_periods=lookback)
+    weights  = ICCalibrator.ic_to_weights(mean_ic, blend=blend)
+    ICCalibrator.save(weights, mean_ic)
+
+    # ── 打印结果 ───────────────────────────────────────────────────────────────
+    from rich.table import Table as RichTable
+    from factor.engine import DEFAULT_WEIGHTS
+
+    t = RichTable(title="截面 Rank-IC 校准结果", show_header=True, header_style="bold cyan")
+    t.add_column("Factor",     style="white",  width=18)
+    t.add_column("Mean IC",    justify="right", width=10)
+    t.add_column("Default W",  justify="right", width=10)
+    t.add_column("New Weight", justify="right", width=10)
+    t.add_column("Change",     justify="right", width=10)
+
+    for fname in DEFAULT_WEIGHTS:
+        ic_val  = mean_ic.get(fname, 0.0)
+        dw      = DEFAULT_WEIGHTS[fname]
+        nw      = weights.get(fname, dw)
+        delta   = nw - dw
+        ic_str  = f"[green]{ic_val:+.3f}[/green]" if ic_val > 0.02 else (
+                  f"[red]{ic_val:+.3f}[/red]"     if ic_val < -0.02 else f"{ic_val:+.3f}")
+        dw_str  = f"{dw:+.3f}"
+        nw_str  = f"[bold]{nw:+.3f}[/bold]"
+        dl_str  = f"[green]{delta:+.3f}[/green]" if delta > 0.001 else (
+                  f"[red]{delta:+.3f}[/red]"      if delta < -0.001 else f"{delta:+.3f}")
+        t.add_row(fname, ic_str, dw_str, nw_str, dl_str)
+
+    console.print(t)
+    console.print(f"\n[bold green]✓ 权重已保存 → data/factor_weights.json[/bold green]")
+    console.print("[dim]下次运行 alpaca-paper / factor-backtest 时自动加载新权重[/dim]")
+
+
 if __name__ == "__main__":
     app()
