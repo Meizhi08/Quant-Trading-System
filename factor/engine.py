@@ -17,7 +17,7 @@
 动态权重（默认开启）：
   每次 compute() 时用近 60 日滚动 Rank-IC 微调权重。
   IC 高的因子加权，IC 弱或方向相反的因子减权。
-  与外部 ic-tune 保存的文件权重叠加，不互斥。
+  与外部 ic-calibrate 保存的文件权重叠加，不互斥。
 """
 
 from __future__ import annotations

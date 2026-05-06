@@ -47,7 +47,7 @@ class ICCalibrator:
         self.forward_days    = forward_days
         self.rebalance_every = rebalance_every
         # Engine with dynamic weights off — pure factor scores, no IC loop
-        self._engine = FactorEngine(use_dynamic_weights=False)
+        self._engine = FactorEngine()
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -161,7 +161,7 @@ class ICCalibrator:
         ic_scale: float = 0.05,
     ) -> dict[str, float]:
         """
-        Multiplicative IC adjustment (same logic as engine._blend_weights).
+        Multiplicative IC adjustment.
 
         new_weight = default * (1 + blend * clip(aligned_IC / ic_scale, -1, 1))
 
