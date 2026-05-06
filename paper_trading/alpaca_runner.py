@@ -68,7 +68,6 @@ class AlpacaPaperRunner:
         universe: str         = "sp500",
         top_n: int            = 20,
         rebalance_days: int   = 30,
-        spy_filter: bool      = True,
         stop_loss_pct: float  = 0.15,
         atr_multiplier: float = 2.5,
         max_sector_pct: float = 0.25,
@@ -76,7 +75,6 @@ class AlpacaPaperRunner:
         self.universe        = universe
         self.top_n           = top_n
         self.rebalance_days  = rebalance_days
-        self.spy_filter      = spy_filter
         self.stop_loss_pct   = stop_loss_pct
         self.atr_multiplier  = atr_multiplier
         self.max_sector_pct  = max_sector_pct
@@ -409,15 +407,9 @@ class AlpacaPaperRunner:
 
         if rebalance_due:
             scores, sector_map = self._score_universe()
-            spy_close, spy_ok  = self._get_spy_data()
+            spy_close, _       = self._get_spy_data()
 
-            if self.spy_filter and not spy_ok:
-                logger.warning("SPY below MA200 — closing all positions")
-                for sym in self._current_positions():
-                    self._close_position(sym)
-                    trades.append({"symbol": sym, "side": "SELL", "notional": 0, "reason": "spy_filter"})
-            else:
-                trades = self._rebalance(equity, scores, sector_map)
+            trades = self._rebalance(equity, scores, sector_map)
             rebalanced = True
 
         else:
@@ -428,7 +420,6 @@ class AlpacaPaperRunner:
             )
             scores, _ = self._load_scores_cache()
             if not scores:
-                # Cache expired — fall back to full scoring (no trades, just refresh cache)
                 logger.warning("Cache expired mid-cycle, re-scoring universe (no rebalance)")
                 scores, sector_map = self._score_universe()
 
