@@ -16,8 +16,6 @@ A fully automated equity selection system that scores all ~500 S&P 500 stocks us
 
 Every 30 calendar days the system rescores the full S&P 500 universe and rebalances. Between rebalances it checks each position **daily** for ATR-based stop-losses and replaces triggered positions without waiting for the next cycle.
 
-The system runs entirely without manual intervention: a macOS `launchd` daemon fires at 4:47 PM ET on every trading day, logs all activity to CSV, and generates an interactive HTML performance dashboard.
-
 ## Factor Model (12 Factors)
 
 Weights are calibrated via rolling **Rank-IC** — factors with higher recent predictive power receive more weight automatically.
@@ -83,4 +81,3 @@ python main.py risk-report
 python main.py factor-backtest --start 2015-01-01 --end 2026-01-01
 ```
 
-*Submitted to CUHK QFRM Admissions · May 2026*
