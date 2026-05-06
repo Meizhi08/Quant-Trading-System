@@ -1,0 +1,15 @@
+.env
+.venv/
+.venv-1/
+__pycache__/
+*.pyc
+cache/
+data/
+logs/
+*.pkl
+*.csv
+*.html
+generate_portfolio_pdf.py
+CUHK_QFRM_QuantProject.pdf
+CUHK_QFRM_QuantProject.html
+.DS_Store
