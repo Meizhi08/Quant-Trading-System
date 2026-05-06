@@ -173,7 +173,7 @@ class AlpacaPaperRunner:
         with open(_SCORES_CACHE) as f:
             data = json.load(f)
         cache_date = date.fromisoformat(data.get("date", "1970-01-01"))
-        if (date.today() - cache_date).days > self.rebalance_days:
+        if (date.today() - cache_date).days >= self.rebalance_days:
             logger.warning(
                 f"Scores cache expired ({cache_date}), will trigger full re-score"
             )
@@ -271,6 +271,8 @@ class AlpacaPaperRunner:
 
     def _score_weights(self, top_scores: list[tuple[str, float]]) -> dict[str, float]:
         """Allocation weights proportional to score, sum to 1. Min weight = ~epsilon."""
+        if not top_scores:
+            return {}
         syms    = [s for s, _ in top_scores]
         vals    = [v for _, v in top_scores]
         min_v   = min(vals)

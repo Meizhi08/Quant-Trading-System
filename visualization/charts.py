@@ -41,7 +41,7 @@ def _df_to_tv_volume(df: pd.DataFrame) -> list[dict]:
         rows.append({
             "time":  t,
             "value": float(row["volume"]),
-            "color": "rgba(239,35,42,0.5)" if up else "rgba(20,177,67,0.5)",
+            "color": "rgba(20,177,67,0.5)" if up else "rgba(239,35,42,0.5)",
         })
     return rows
 
@@ -266,7 +266,7 @@ class ChartBuilder:
         mv = [round(v * 100, 2) for v in monthly_ret.values]
         monthly_fig = go.Figure(go.Bar(
             x=list(monthly_ret.index), y=mv,
-            marker_color=["#ef232a" if v >= 0 else "#14b143" for v in mv],
+            marker_color=["#14b143" if v >= 0 else "#ef232a" for v in mv],
             text=[f"{v:+.1f}%" for v in mv], textposition="outside",
         ))
         monthly_fig.update_layout(title="月度收益", template="plotly_dark",
@@ -281,12 +281,13 @@ class ChartBuilder:
                 buy_q.append(t)
             elif t["side"] == "SELL" and buy_q:
                 b = buy_q.pop(0)
-                pnl = (t["price"] - b["price"]) * abs(t["size"])
+                qty = t.get("qty", t.get("size", 0))
+                pnl = (t["price"] - b["price"]) * abs(qty)
                 pct = (t["price"] - b["price"]) / b["price"]
                 paired.append({
                     "买入日期": b["date"], "买入价": f"{b['price']:.2f}",
                     "卖出日期": t["date"], "卖出价": f"{t['price']:.2f}",
-                    "数量": abs(int(t["size"])),
+                    "数量": abs(int(qty)),
                     "盈亏($)": f"{pnl:+.0f}",
                     "涨跌幅":  f"{pct:+.2%}",
                 })
@@ -465,7 +466,7 @@ class ChartBuilder:
         mv = [round(v * 100, 2) for v in monthly_ret.values]
         monthly_fig = go.Figure(go.Bar(
             x=list(monthly_ret.index), y=mv,
-            marker_color=["#ef232a" if v >= 0 else "#14b143" for v in mv],
+            marker_color=["#14b143" if v >= 0 else "#ef232a" for v in mv],
             text=[f"{v:+.1f}%" for v in mv], textposition="outside",
         ))
         monthly_fig.update_layout(
