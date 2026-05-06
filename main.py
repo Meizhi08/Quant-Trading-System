@@ -451,7 +451,6 @@ def factor_paper(
     rebalance_days: int   = typer.Option(30,          help="调仓周期（日历日）"),
     initial_cash: float   = typer.Option(100_000.0,  help="初始资金（首次运行有效）"),
     transaction_cost: float = typer.Option(0.001,    help="单边交易成本（0.1%）"),
-    spy_filter: bool      = typer.Option(True, "--spy-filter/--no-spy-filter", help="SPY 跌破 200日均线时清仓转现金（默认开启）"),
 ):
     """
     因子选股实盘模拟（路线A）：每月用 FactorEngine 从全市场选 Top N，等权持有，对标 SPY。
@@ -465,7 +464,6 @@ def factor_paper(
         rebalance_days=rebalance_days,
         initial_cash=initial_cash,
         transaction_cost_pct=transaction_cost,
-        spy_filter=spy_filter,
     )
     report = runner.run()
 

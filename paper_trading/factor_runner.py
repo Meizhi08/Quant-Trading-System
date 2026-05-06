@@ -40,14 +40,12 @@ class FactorPaperRunner:
         rebalance_days: int = 30,
         initial_cash: float = 100_000.0,
         transaction_cost_pct: float = 0.001,
-        spy_filter: bool = True,
     ):
         self.universe             = universe
         self.top_n                = top_n
         self.rebalance_days       = rebalance_days
         self.initial_cash         = initial_cash
         self.transaction_cost_pct = transaction_cost_pct
-        self.spy_filter           = spy_filter
         self.fetcher              = DataFetcher(use_cache=True)
         self.engine               = FactorEngine()
         self._state               = self._load_state()
@@ -204,43 +202,6 @@ class FactorPaperRunner:
 
     # ── Main entry ────────────────────────────────────────────────────────────
 
-    def _spy_above_ma200(self) -> bool:
-        """Return True if SPY is currently above its 200-day MA."""
-        try:
-            end   = str(date.today())
-            start = str(date.today() - timedelta(days=300))
-            spy_df = self.fetcher.get_kline("SPY", start, end)
-            if spy_df.empty or len(spy_df) < 150:
-                return True  # data unavailable → don't block trading
-            ma200 = spy_df["close"].rolling(200, min_periods=150).mean().iloc[-1]
-            return bool(spy_df["close"].iloc[-1] > ma200)
-        except Exception:
-            return True  # on error → don't block trading
-
-    def _liquidate_all(self) -> list[dict]:
-        """Sell all holdings and move to cash."""
-        today_str = str(date.today())
-        trades: list[dict] = []
-        if not self._state["holdings"]:
-            return trades
-        prices = self._get_prices(list(self._state["holdings"].keys()))
-        for sym in list(self._state["holdings"].keys()):
-            pos      = self._state["holdings"][sym]
-            price    = prices.get(sym, pos["avg_cost"])
-            proceeds = pos["qty"] * price * (1 - self.transaction_cost_pct)
-            self._state["cash"] += proceeds
-            trade = {
-                "date": today_str, "symbol": sym, "side": "SELL",
-                "qty": round(pos["qty"], 4), "price": round(price, 4),
-                "cost": round(pos["qty"] * price * self.transaction_cost_pct, 2),
-            }
-            trades.append(trade)
-            self._state["trade_log"].append(trade)
-            logger.info(f"SPY FILTER: SELL {sym} x{pos['qty']:.2f} @ {price:.2f}")
-        self._state["holdings"] = {}
-        self._state["last_rebalance"] = today_str
-        return trades
-
     def run(self) -> dict:
         """Execute one day of factor paper trading. Call once per trading day."""
         today_str  = str(date.today())
@@ -251,10 +212,7 @@ class FactorPaperRunner:
         )
         rebalance_due = days_since >= self.rebalance_days
 
-        if rebalance_due and self.spy_filter and not self._spy_above_ma200():
-            logger.warning("SPY below MA200 — liquidating to cash")
-            trades = self._liquidate_all()
-        elif rebalance_due:
+        if rebalance_due:
             trades = self._rebalance()
         else:
             trades = []

@@ -82,34 +82,13 @@ class FactorEngine:
     def __init__(
         self,
         weights: dict[str, float] | None = None,
-        use_dynamic_weights: bool | None = None,
-        dynamic_window: int = 60,
-        dynamic_forward: int = 5,
-        dynamic_alpha: float = 0.30,
     ):
-        # 优先级：传入权重 > IC 文件权重 > 默认权重
-        _from_calibrated_source = False
+        # Priority: passed weights > IC file weights > default weights
         if weights is not None:
             self.weights = weights
-            _from_calibrated_source = True
         else:
             loaded = self._load_ic_weights()
-            if loaded is not None:
-                self.weights = loaded
-                _from_calibrated_source = True
-            else:
-                self.weights = DEFAULT_WEIGHTS
-
-        # 如果权重来自截面IC文件或外部传入，跳过 per-bar 时间序列IC调权
-        # （截面IC权重已经是校准过的，再叠加单股时序IC会引入噪声）
-        if use_dynamic_weights is None:
-            self.use_dynamic_weights = not _from_calibrated_source
-        else:
-            self.use_dynamic_weights = use_dynamic_weights
-
-        self.dynamic_window  = dynamic_window
-        self.dynamic_forward = dynamic_forward
-        self.dynamic_alpha   = dynamic_alpha
+            self.weights = loaded if loaded is not None else DEFAULT_WEIGHTS
 
     # ── IC 权重文件加载 ────────────────────────────────────────────────────────
 
@@ -153,15 +132,8 @@ class FactorEngine:
             "pb_score":       self._pb_score(fund),
         }
 
-        # 动态权重：用滚动 IC 微调（仅在无外部校准权重时启用）
-        weights = self.weights
-        if self.use_dynamic_weights:
-            ic = self._rolling_ic(df)
-            if ic:
-                weights = self._blend_weights(self.weights, ic)
-
         # 基本面因子缺失时，将其权重重分配给其余正权重因子
-        weights = self._redistribute_dead_weights(weights, fund)
+        weights = self._redistribute_dead_weights(self.weights, fund)
 
         raw_sum = sum(
             factors.get(k, 0.0) * w for k, w in weights.items()
@@ -189,103 +161,6 @@ class FactorEngine:
             reason=reason,
             weights_used={k: round(v, 4) for k, v in weights.items()},
         )
-
-    # ── 动态权重 ───────────────────────────────────────────────────────────────
-
-    def _rolling_ic(self, df: pd.DataFrame) -> dict[str, float]:
-        """用向量化操作计算近 N 日每个因子的 Rank-IC。"""
-        n = len(df)
-        win   = self.dynamic_window
-        fwd   = self.dynamic_forward
-        need  = win + fwd + 65   # 65 = 因子预热期
-        if n < need:
-            return {}
-
-        close  = df["close"]
-        volume = df["volume"] if "volume" in df.columns else pd.Series(np.nan, index=df.index)
-
-        # 向量化计算所有因子序列
-        series: dict[str, pd.Series] = {}
-        series["momentum_5"]     = (close.pct_change(5)  / 0.15).clip(-1, 1)
-        series["momentum_20"]    = (close.pct_change(20) / 0.15).clip(-1, 1)
-        series["momentum_60"]    = (close.pct_change(60) / 0.15).clip(-1, 1)
-
-        avg5_v  = volume.rolling(5).mean().shift(1)
-        avg20_v = volume.rolling(20).mean().shift(1)
-        series["vol_ratio"]  = ((volume / avg5_v.replace(0, np.nan) - 1.25) / 0.75).clip(-1, 1)
-        series["vol_trend"]  = ((avg5_v / avg20_v.replace(0, np.nan) - 1.0)  / 0.5).clip(-1, 1)
-
-        ma5  = close.rolling(5).mean()
-        ma10 = close.rolling(10).mean()
-        ma20 = close.rolling(20).mean()
-        ma60 = close.rolling(60).mean()
-        series["ma_alignment"] = (
-            (close > ma5).astype(float) * 2 - 1 +
-            (ma5   > ma10).astype(float) * 2 - 1 +
-            (ma10  > ma20).astype(float) * 2 - 1 +
-            (ma20  > ma60).astype(float) * 2 - 1
-        ) / 4
-
-        lo60 = close.rolling(60).min()
-        hi60 = close.rolling(60).max()
-        series["price_position"] = (
-            (close - lo60) / (hi60 - lo60).replace(0, np.nan) - 0.5
-        ) * 2
-
-        delta = close.diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-        series["rsi_score"] = ((50 - rsi) / 20).clip(-1, 1)
-
-        # 未来 N 日收益（目标变量）
-        fwd_ret = close.pct_change(fwd).shift(-fwd)
-
-        # 取窗口内数据计算 Rank-IC
-        idx_start = n - win - fwd
-        idx_end   = n - fwd
-        fwd_window = fwd_ret.iloc[idx_start:idx_end].values
-
-        ic: dict[str, float] = {}
-        for fname, fseries in series.items():
-            f_window = fseries.iloc[idx_start:idx_end].values
-            mask = np.isfinite(f_window) & np.isfinite(fwd_window)
-            if mask.sum() < 10:
-                ic[fname] = 0.0
-                continue
-            ic[fname] = _spearman(f_window[mask], fwd_window[mask])
-
-        return ic
-
-    def _blend_weights(
-        self,
-        base: dict[str, float],
-        ic: dict[str, float],
-    ) -> dict[str, float]:
-        """
-        新权重 = 基础权重 × (1 + alpha × clip(aligned_IC / 0.1, -1, 1))
-
-        aligned_IC = sign(w) × IC：对于正权重因子，IC>0 表示方向正确→加权；
-        对于负权重因子（如 momentum_5 反转），IC<0 表示反转成立→也应加权。
-        直接用原始 IC 调整负权重因子会反向操作，需要对齐方向。
-        """
-        alpha = self.dynamic_alpha
-        blended: dict[str, float] = {}
-        for k, w in base.items():
-            factor_ic = ic.get(k, 0.0)
-            # 对齐 IC 与权重方向：sign(w) × IC > 0 表示 IC 确认权重方向
-            aligned_ic = float(np.sign(w)) * factor_ic if w != 0 else factor_ic
-            adjustment = alpha * float(np.clip(aligned_ic / 0.10, -1.0, 1.0))
-            blended[k] = w * (1.0 + adjustment)
-
-        # 归一化：保持正权重之和与 base 一致
-        base_pos = sum(max(v, 0) for v in base.values())
-        blend_pos = sum(max(v, 0) for v in blended.values())
-        if blend_pos > 1e-9 and base_pos > 1e-9:
-            scale = base_pos / blend_pos
-            blended = {k: v * scale for k, v in blended.items()}
-
-        return blended
 
     def _redistribute_dead_weights(
         self,
