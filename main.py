@@ -1476,9 +1476,6 @@ def factor_backtest(
     initial_cash: float = typer.Option(100_000, help="初始资金"),
     transaction_cost: float = typer.Option(0.001, help="单边交易成本（默认 0.1%）"),
     n_splits: int = typer.Option(1, help="滚动测试段数（1=不分段，3=三段滚动）"),
-    spy_filter: bool = typer.Option(True, "--spy-filter/--no-spy-filter", help="SPY 跌破 200日均线时退出持仓转现金（默认开启）"),
-    spy_filter_half: bool = typer.Option(False, "--spy-filter-half", help="SPY跌破MA200时保留50%仓位（最高评分的top//2只），而非全清仓"),
-    tlt_rotation: bool = typer.Option(False, "--tlt-rotation", help="SPY跌破MA200时转入TLT长期国债ETF，而非持现金"),
     save_report: bool = typer.Option(True, "--save-report/--no-save-report", help="保存 CSV 报告到 data/"),
     no_fundamentals: bool = typer.Option(False, "--no-fundamentals", help="禁用基本面因子，纯价量/动量策略（用于对比测试）"),
     max_sector_pct: float = typer.Option(0.25, "--max-sector-pct", help="行业集中度上限（默认0.25）"),
@@ -1612,26 +1609,6 @@ def factor_backtest(
     spy_ret = spy_df["close"].pct_change().fillna(0)
     spy_index = {d: i for i, d in enumerate(spy_df.index)}
 
-    # SPY 200 日均线过滤器：预先计算每个交易日是否满足"SPY > MA200"
-    spy_above_ma: dict = {}
-    if spy_filter:
-        spy_ma200 = spy_df["close"].rolling(200, min_periods=150).mean()
-        for d, price, ma in zip(spy_df.index, spy_df["close"], spy_ma200):
-            spy_above_ma[d] = bool(not pd.isna(ma) and price > ma)
-        mode_label = "→ TLT" if tlt_rotation else "→ 现金"
-        console.print(f"[cyan]已启用 SPY 200日均线过滤器：低于均线时{mode_label}[/cyan]")
-
-    # TLT 日收益率（股债轮动模式）
-    tlt_ret: dict = {}
-    if tlt_rotation:
-        try:
-            tlt_df = fetcher.get_kline("TLT", start, end)
-            tlt_r   = tlt_df["close"].pct_change().fillna(0)
-            tlt_ret = {d: float(tlt_r.iloc[i]) for i, d in enumerate(tlt_df.index)}
-            console.print("[cyan]TLT 数据加载完成（股债轮动）[/cyan]")
-        except Exception as e:
-            console.print(f"[yellow]TLT 数据获取失败 ({e})，降级为现金[/yellow]")
-
     window = 120  # 因子计算所需历史窗口
 
     def _get_fund_at_date(sym: str, today) -> dict:
@@ -1655,8 +1632,7 @@ def factor_backtest(
         port_val  = initial_cash
         spy_v     = initial_cash
         holdings: list[str] = []
-        weights:  dict[str, float] = {}   # 评分加权，换仓时更新
-        in_tlt    = False                  # 当前是否持有TLT
+        weights:  dict[str, float] = {}
         last_rb   = -rebalance_days
         rb_log: list[dict] = []
         c_port: list[float] = []
@@ -1673,67 +1649,47 @@ def factor_backtest(
                 if si > 0:
                     spy_v *= (1 + float(spy_ret.iloc[si]))
 
-            # TLT 轮动收益（每日跟踪，不只在调仓日）
-            if in_tlt and tlt_rotation:
-                port_val *= (1 + tlt_ret.get(today, 0.0))
-
             # 调仓
             if di - last_rb >= rebalance_days:
-                spy_bearish = spy_filter and spy_above_ma and not spy_above_ma.get(today, True)
+                scores: list[tuple[str, float]] = []
+                for sym, full_df in stock_data.items():
+                    loc = full_df.index.get_indexer([today], method="ffill")[0]
+                    if loc < window:
+                        continue
+                    slice_df = full_df.iloc[loc - window: loc]
+                    if len(slice_df) < 60:
+                        continue
+                    try:
+                        fs = engine.compute(slice_df, sym,
+                                            fundamentals=_get_fund_at_date(sym, today))
+                        scores.append((sym, fs.total_score))
+                    except Exception:
+                        pass
 
-                # SPY 过滤器：均线以下，非半仓模式则清仓或转TLT
-                if spy_bearish and not spy_filter_half:
-                    if holdings or not in_tlt:
-                        action = "转入 TLT" if tlt_rotation else "清仓转现金"
-                        console.print(f"  [yellow]{str(today)[:10]} SPY 跌破 MA200，{action}[/yellow]")
-                        holdings = []
-                        in_tlt = tlt_rotation
-                    last_rb = di
-                else:
-                    target_top = top // 2 if spy_bearish and spy_filter_half else top
-                    if spy_bearish:
-                        console.print(f"  [yellow]{str(today)[:10]} SPY 跌破 MA200，半仓模式持有 top {target_top}[/yellow]")
-                    scores: list[tuple[str, float]] = []
-                    for sym, full_df in stock_data.items():
-                        loc = full_df.index.get_indexer([today], method="ffill")[0]
-                        if loc < window:
-                            continue
-                        slice_df = full_df.iloc[loc - window: loc]  # exclude today: score on yesterday's close, earn today's return
-                        if len(slice_df) < 60:
-                            continue
-                        try:
-                            fs = engine.compute(slice_df, sym,
-                                                fundamentals=_get_fund_at_date(sym, today))
-                            scores.append((sym, fs.total_score))
-                        except Exception:
-                            pass
+                if len(scores) >= top:
+                    scores.sort(key=lambda x: x[1], reverse=True)
+                    constrained = _bt_apply_constraints(scores, top, max_sector_pct)
+                    new_h   = [s for s, _ in constrained]
+                    weights = _bt_score_weights(constrained)
 
-                    if len(scores) >= target_top:
-                        scores.sort(key=lambda x: x[1], reverse=True)
-                        constrained = _bt_apply_constraints(scores, target_top, max_sector_pct)
-                        new_h   = [s for s, _ in constrained]
-                        weights = _bt_score_weights(constrained)
+                    old_set  = set(holdings)
+                    new_set  = set(new_h)
+                    turnover = len(new_set - old_set) / top
+                    port_val *= (1 - turnover * transaction_cost)
 
-                        # 交易成本：按换手率扣费
-                        old_set = set(holdings)
-                        new_set = set(new_h)
-                        turnover = len(new_set - old_set) / target_top
-                        port_val *= (1 - turnover * transaction_cost)
+                    date_str = str(today.date()) if hasattr(today, "date") else str(today)[:10]
+                    rb_log.append({
+                        "date": date_str,
+                        "holdings": new_h,
+                        "top_score": round(scores[0][1], 3),
+                        "bottom_score": round(constrained[-1][1], 3),
+                        "turnover": round(turnover * 100, 1),
+                    })
+                    holdings = new_h
+                    last_rb  = di
 
-                        date_str = str(today.date()) if hasattr(today, "date") else str(today)[:10]
-                        rb_log.append({
-                            "date": date_str,
-                            "holdings": new_h,
-                            "top_score": round(scores[0][1], 3),
-                            "bottom_score": round(constrained[-1][1], 3),
-                            "turnover": round(turnover * 100, 1),
-                        })
-                        holdings = new_h
-                        in_tlt   = False   # 回归股票仓位，退出TLT
-                        last_rb  = di
-
-            # 持仓收益（评分加权，TLT收益已在调仓判断前处理）
-            if holdings and not in_tlt:
+            # 持仓收益（评分加权）
+            if holdings:
                 day_ret = 0.0
                 eq_w = 1.0 / len(holdings)  # fallback if weights missing
                 for sym in holdings:
