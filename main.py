@@ -864,7 +864,7 @@ def select_stocks_cmd(
 
 @app.command(name="factor-backtest")
 def factor_backtest(
-    universe: str = typer.Option("sp500", help="股票池: sp500 | tsx60 | 逗号分隔代码"),
+    universe: str = typer.Option("sp500", help="股票池: sp500 | tsx60 | russell2000 | 逗号分隔代码"),
     top: int = typer.Option(10, help="每期持有股票数"),
     rebalance_days: int = typer.Option(20, help="调仓周期（交易日）"),
     start: str = typer.Option("2020-01-01", help="回测开始日期"),
@@ -901,7 +901,7 @@ def factor_backtest(
         if not all_syms:
             console.print("[red]获取股票列表失败[/red]")
             raise typer.Exit(1)
-        all_syms = sorted(all_syms)  # 排序确保抽样确定性
+        all_syms = sorted(all_syms)
         if no_sample:
             symbols = all_syms
             console.print(f"[cyan]全量模式：使用全部 {len(symbols)} 只股票（与 factor-paper 一致）[/cyan]")
@@ -911,6 +911,19 @@ def factor_backtest(
     elif universe.lower() == "tsx60":
         from data.stock_selector import get_tsx60_symbols
         symbols = get_tsx60_symbols()
+    elif universe.lower() == "russell2000":
+        from data.stock_selector import get_russell2000_symbols
+        all_syms = get_russell2000_symbols()
+        if not all_syms:
+            console.print("[red]Russell 2000 列表获取失败[/red]")
+            raise typer.Exit(1)
+        all_syms = sorted(all_syms)
+        if no_sample:
+            symbols = all_syms
+            console.print(f"[cyan]全量模式：Russell 2000 全部 {len(symbols)} 只[/cyan]")
+        else:
+            random.seed(42)
+            symbols = random.sample(all_syms, min(max_stocks, len(all_syms)))
     else:
         symbols = [s.strip() for s in universe.split(",")]
     console.print(f"[bold]股票池：{len(symbols)} 只  调仓周期：{rebalance_days}日  每期持有：{top} 只[/bold]")
