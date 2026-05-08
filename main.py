@@ -865,7 +865,7 @@ def select_stocks_cmd(
 @app.command(name="factor-backtest")
 def factor_backtest(
     universe: str = typer.Option("sp500", help="股票池: sp500 | tsx60 | russell2000 | 逗号分隔代码"),
-    top: int = typer.Option(10, help="每期持有股票数"),
+    top: int = typer.Option(20, help="每期持有股票数"),
     rebalance_days: int = typer.Option(20, help="调仓周期（交易日）"),
     start: str = typer.Option("2020-01-01", help="回测开始日期"),
     end: str = typer.Option(str(date.today()), help="回测结束日期"),
