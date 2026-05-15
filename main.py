@@ -465,6 +465,9 @@ def alpaca_paper(
     因子选股实盘 —— 通过 Alpaca Paper Trading API 执行真实（模拟）订单。
     需要在 .env 中设置 ALPACA_API_KEY 和 ALPACA_SECRET_KEY。
     """
+    import time as _time
+    _time.sleep(15)  # wait for network after launchd wake
+
     from paper_trading.alpaca_runner import AlpacaPaperRunner
     from dotenv import load_dotenv
     load_dotenv()
