@@ -298,27 +298,39 @@ def test_run_defers_full_rebalance_but_still_runs_stop_loss_check():
     stop-loss check must run every cycle; only the FULL rebalance (which does need a
     completed day's data) gets deferred.
     """
+    import tempfile
     from datetime import date, timedelta
+    from pathlib import Path
     from unittest.mock import patch
+    import paper_trading.alpaca_runner as ar
     from paper_trading.alpaca_runner import AlpacaPaperRunner
 
     runner = AlpacaPaperRunner.__new__(AlpacaPaperRunner)
     runner.rebalance_days = 30
     runner.overdue_multiplier = 1.5
 
+    # run() writes _LAST_RUN_PATH for real at the end — redirect it to a throwaway
+    # file so this test never touches the project's real data/alpaca_last_run.txt
+    # (which alpaca-health reads to judge whether the live job is actually running).
+    tmp_last_run = Path(tempfile.mktemp())
+
     # 35 days >= rebalance_days(30) so a rebalance IS due, but 35 < 30*1.5=45 so it is
     # NOT yet overdue -> must defer the full rebalance, not force it through.
-    with patch.object(AlpacaPaperRunner, "_last_rebalance_date", return_value=date.today() - timedelta(days=35)), \
-         patch("paper_trading.alpaca_runner._market_closed_for_today", return_value=False), \
-         patch.object(AlpacaPaperRunner, "_account_equity", return_value=100_000.0), \
-         patch.object(AlpacaPaperRunner, "_current_positions", return_value={}), \
-         patch.object(AlpacaPaperRunner, "_load_scores_cache", return_value=([("AAPL", 0.5)], {"AAPL": "Tech"})), \
-         patch.object(AlpacaPaperRunner, "_get_spy_data", return_value=(500.0, True)), \
-         patch.object(AlpacaPaperRunner, "_check_and_swap_stop_loss", return_value=[]) as mock_stop_loss, \
-         patch.object(AlpacaPaperRunner, "_rebalance") as mock_rebalance, \
-         patch.object(AlpacaPaperRunner, "_verify_orders", return_value={"rejected": 0, "partial": 0}), \
-         patch.object(AlpacaPaperRunner, "_save_log"):
-        report = runner.run()
+    try:
+        with patch.object(ar, "_LAST_RUN_PATH", tmp_last_run), \
+             patch.object(AlpacaPaperRunner, "_last_rebalance_date", return_value=date.today() - timedelta(days=35)), \
+             patch("paper_trading.alpaca_runner._market_closed_for_today", return_value=False), \
+             patch.object(AlpacaPaperRunner, "_account_equity", return_value=100_000.0), \
+             patch.object(AlpacaPaperRunner, "_current_positions", return_value={}), \
+             patch.object(AlpacaPaperRunner, "_load_scores_cache", return_value=([("AAPL", 0.5)], {"AAPL": "Tech"})), \
+             patch.object(AlpacaPaperRunner, "_get_spy_data", return_value=(500.0, True)), \
+             patch.object(AlpacaPaperRunner, "_check_and_swap_stop_loss", return_value=[]) as mock_stop_loss, \
+             patch.object(AlpacaPaperRunner, "_rebalance") as mock_rebalance, \
+             patch.object(AlpacaPaperRunner, "_verify_orders", return_value={"rejected": 0, "partial": 0}), \
+             patch.object(AlpacaPaperRunner, "_save_log"):
+            report = runner.run()
+    finally:
+        tmp_last_run.unlink(missing_ok=True)
 
     assert mock_stop_loss.called, "stop-loss check must still run even though the full rebalance is deferred"
     assert not mock_rebalance.called, "the full rebalance itself must be deferred, not forced through"
@@ -331,26 +343,37 @@ def test_run_forces_full_rebalance_when_overdue_despite_market_still_open():
     through even though the market hasn't closed (data `end` cutoffs inside
     _score_universe/_get_spy_data are what actually keep this safe, tested
     separately via _last_completed_session_cutoff's usage)."""
+    import tempfile
     from datetime import date, timedelta
+    from pathlib import Path
     from unittest.mock import patch
+    import paper_trading.alpaca_runner as ar
     from paper_trading.alpaca_runner import AlpacaPaperRunner
 
     runner = AlpacaPaperRunner.__new__(AlpacaPaperRunner)
     runner.rebalance_days = 30
     runner.overdue_multiplier = 1.5
 
+    # See the note in the previous test — redirect the real-run-time last-run marker
+    # so this test can't corrupt data/alpaca_last_run.txt.
+    tmp_last_run = Path(tempfile.mktemp())
+
     # 50 days >= 30*1.5=45 day backstop -> overdue, must force the rebalance through.
-    with patch.object(AlpacaPaperRunner, "_last_rebalance_date", return_value=date.today() - timedelta(days=50)), \
-         patch("paper_trading.alpaca_runner._market_closed_for_today", return_value=False), \
-         patch.object(AlpacaPaperRunner, "_account_equity", return_value=100_000.0), \
-         patch.object(AlpacaPaperRunner, "_current_positions", return_value={}), \
-         patch.object(AlpacaPaperRunner, "_score_universe", return_value=([("AAPL", 0.5)], {"AAPL": "Tech"})), \
-         patch.object(AlpacaPaperRunner, "_get_spy_data", return_value=(500.0, True)), \
-         patch.object(AlpacaPaperRunner, "_rebalance", return_value=[]) as mock_rebalance, \
-         patch.object(AlpacaPaperRunner, "_check_and_swap_stop_loss") as mock_stop_loss, \
-         patch.object(AlpacaPaperRunner, "_verify_orders", return_value={"rejected": 0, "partial": 0}), \
-         patch.object(AlpacaPaperRunner, "_save_log"):
-        report = runner.run()
+    try:
+        with patch.object(ar, "_LAST_RUN_PATH", tmp_last_run), \
+             patch.object(AlpacaPaperRunner, "_last_rebalance_date", return_value=date.today() - timedelta(days=50)), \
+             patch("paper_trading.alpaca_runner._market_closed_for_today", return_value=False), \
+             patch.object(AlpacaPaperRunner, "_account_equity", return_value=100_000.0), \
+             patch.object(AlpacaPaperRunner, "_current_positions", return_value={}), \
+             patch.object(AlpacaPaperRunner, "_score_universe", return_value=([("AAPL", 0.5)], {"AAPL": "Tech"})), \
+             patch.object(AlpacaPaperRunner, "_get_spy_data", return_value=(500.0, True)), \
+             patch.object(AlpacaPaperRunner, "_rebalance", return_value=[]) as mock_rebalance, \
+             patch.object(AlpacaPaperRunner, "_check_and_swap_stop_loss") as mock_stop_loss, \
+             patch.object(AlpacaPaperRunner, "_verify_orders", return_value={"rejected": 0, "partial": 0}), \
+             patch.object(AlpacaPaperRunner, "_save_log"):
+            report = runner.run()
+    finally:
+        tmp_last_run.unlink(missing_ok=True)
 
     assert mock_rebalance.called, "overdue rebalance must be forced through despite market not being closed"
     assert not mock_stop_loss.called

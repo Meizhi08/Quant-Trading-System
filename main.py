@@ -17,6 +17,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import typer
@@ -485,7 +486,7 @@ def alpaca_paper(
     stop_loss_pct: float  = typer.Option(0.15,     help="ATR不可用时的固定止损比例"),
     atr_multiplier: float = typer.Option(2.5,      help="ATR止损倍数，止损价=买入价-N×ATR"),
     max_sector_pct: float = typer.Option(0.25,     help="行业集中度上限，如0.25表示每个行业不超过25%仓位"),
-    max_position_pct: float | None = typer.Option(None, help="单票仓位上限（默认取 config.settings.max_position_pct）"),
+    max_position_pct: Optional[float] = typer.Option(None, help="单票仓位上限（默认取 config.settings.max_position_pct）"),
     force_rebalance: bool = typer.Option(False, "--force-rebalance/--no-force-rebalance", help="忽略日期检查，立即执行全量换仓"),
     dry_run: bool = typer.Option(False, "--dry-run/--live", help="演练模式：只打分/计算，不向 Alpaca 提交任何订单"),
     overdue_multiplier: float = typer.Option(1.5, help="调仓逾期多少倍 rebalance_days 后，即使未到ET收盘也强制执行"),
