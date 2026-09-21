@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -205,8 +206,15 @@ class AutoOptimizer:
         }
 
         _BEST_PARAMS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(_BEST_PARAMS_FILE, "w", encoding="utf-8") as f:
+        # Atomic write: two concurrent optimize runs (e.g. a walk-forward loop plus a
+        # manual auto-optimize) must never leave the shared file truncated/corrupted
+        # mid-write. Write to a sibling temp file, then rename — os.replace() is atomic
+        # on the same filesystem, so readers always see either the old or the new
+        # complete content, never a partial one.
+        tmp_path = _BEST_PARAMS_FILE.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _BEST_PARAMS_FILE)
 
         logger.info(f"最优参数已保存: {_BEST_PARAMS_FILE}")
         return result

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -68,7 +69,11 @@ class FactorPaperRunner:
 
     def _save_state(self) -> None:
         _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_PATH.write_text(json.dumps(self._state, indent=2, default=str))
+        # Atomic write — this is the sole source of truth for live cash/holdings; a
+        # crash mid-write must never leave it truncated (would look like 0 holdings).
+        tmp_path = _STATE_PATH.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(self._state, indent=2, default=str))
+        os.replace(tmp_path, _STATE_PATH)
 
     # ── Price helpers ─────────────────────────────────────────────────────────
 
@@ -168,6 +173,29 @@ class FactorPaperRunner:
             current_qty = self._state["holdings"].get(sym, {}).get("qty", 0.0)
             current_val = current_qty * price
             diff_val    = target_per_stock - current_val
+
+            if diff_val <= -price:
+                # Overweight survivor from a prior cycle — trim back toward equal weight
+                # instead of letting it drift indefinitely across rebalances.
+                sell_qty = min(current_qty, abs(diff_val) / price / (1 - self.transaction_cost_pct))
+                if sell_qty < 0.01:
+                    continue
+                proceeds = sell_qty * price * (1 - self.transaction_cost_pct)
+                self._state["cash"] += proceeds
+                new_qty = current_qty - sell_qty
+                if new_qty < 0.01:
+                    del self._state["holdings"][sym]
+                else:
+                    self._state["holdings"][sym]["qty"] = round(new_qty, 4)
+                trade = {
+                    "date": today_str, "symbol": sym, "side": "SELL",
+                    "qty": round(sell_qty, 4), "price": round(price, 4),
+                    "cost": round(sell_qty * price * self.transaction_cost_pct, 2),
+                }
+                trades.append(trade)
+                self._state["trade_log"].append(trade)
+                logger.info(f"TRIM {sym} x{sell_qty:.2f} @ {price:.2f}")
+                continue
 
             if diff_val < price:  # already at or above target, skip
                 continue

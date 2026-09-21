@@ -38,6 +38,12 @@ class PaperBroker(BrokerBase):
             symbol=symbol, side=OrderSide.BUY,
             quantity=quantity, price=price,
         )
+        if quantity <= 0:
+            order.status = OrderStatus.REJECTED
+            order.error_msg = "数量必须为正"
+            logger.warning(f"[PaperBroker] 买单拒绝: {symbol} 非法数量 {quantity}")
+            self._orders[order.order_id] = order
+            return order
         cost = quantity * price * (1 + settings.commission_rate)
         if cost > self._cash:
             order.status = OrderStatus.REJECTED
@@ -63,6 +69,12 @@ class PaperBroker(BrokerBase):
             symbol=symbol, side=OrderSide.SELL,
             quantity=quantity, price=price,
         )
+        if quantity <= 0:
+            order.status = OrderStatus.REJECTED
+            order.error_msg = "数量必须为正"
+            logger.warning(f"[PaperBroker] 卖单拒绝: {symbol} 非法数量 {quantity}")
+            self._orders[order.order_id] = order
+            return order
         pos = self._positions.get(symbol)
         if not pos or pos["qty"] < quantity:
             order.status = OrderStatus.REJECTED
@@ -98,8 +110,13 @@ class PaperBroker(BrokerBase):
             for sym, p in self._positions.items()
         ]
 
-    def get_balance(self) -> dict:
-        total_mv = sum(p["qty"] * p["avg_cost"] for p in self._positions.values())
+    def get_balance(self, prices: dict[str, float] | None = None) -> dict:
+        """prices: {symbol: 最新市价}，缺失的持仓退化为按成本价估值（仅用于冷启动）。"""
+        prices = prices or {}
+        total_mv = sum(
+            p["qty"] * prices.get(sym, p["avg_cost"])
+            for sym, p in self._positions.items()
+        )
         return {
             "cash": self._cash,
             "market_value": total_mv,

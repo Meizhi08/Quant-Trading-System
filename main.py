@@ -343,6 +343,7 @@ def live(
     import time
 
     from broker import PaperBroker
+    from broker.base import OrderStatus
     broker = PaperBroker()
 
     if not broker.connect():
@@ -354,11 +355,17 @@ def live(
     risk = RiskManager()
     strat = _get_strategy(strategy, live=True)
     symbol_list = [s.strip() for s in symbols.split(",")]
+    last_prices: dict[str, float] = {}
+
+    # 用当前券商持仓初始化风控的持仓快照，否则 can_open_position/仓位上限检查形同虚设
+    for p in broker.get_positions():
+        risk.update_position(p["symbol"], int(p["quantity"]), p["avg_cost"])
 
     console.print(f"[green]实盘扫描启动: {symbol_list} 策略={strategy}[/green]")
 
     try:
-        while True:
+        halted = False
+        while not halted:
             now = datetime.now()
             # 仅在交易时间运行
             if now.weekday() < 5 and ((9, 30) <= (now.hour, now.minute) <= (15, 0)):
@@ -367,37 +374,56 @@ def live(
                         end = str(date.today())
                         start = str(date.today() - timedelta(days=120))
                         df = fetcher.get_kline(sym, start, end)
+                        price = float(df["close"].iloc[-1])
+                        last_prices[sym] = price
+                        risk.update_prices({sym: price})
+
                         sig = strat.run(df, sym)
                         console.print(sig)
 
                         if sig.signal.value == "BUY":
-                            balance = broker.get_balance()
+                            balance = broker.get_balance(last_prices)
                             total_equity = balance["total_equity"]
                             pos_pct = risk.kelly_position_size(0.55, 0.10, 0.05)
                             buy_value = total_equity * pos_pct
-                            price = float(df["close"].iloc[-1])
                             qty = int(buy_value / price / 100) * 100
                             if qty > 0 and risk.can_open_position(sym, buy_value, total_equity):
                                 order = broker.buy(sym, qty, price)
                                 console.print(f"[red]买单: {order}[/red]")
-                                notifier.send_signal(sig)
+                                if order.status == OrderStatus.FILLED:
+                                    risk.update_position(sym, order.filled_qty, order.filled_price)
+                                    risk.record_daily_pnl(-order.commission)
+                                    notifier.send_signal(sig)
 
                         elif sig.signal.value == "SELL":
                             positions = broker.get_positions()
                             for p in positions:
                                 if p["symbol"] == sym and p["quantity"] > 0:
-                                    price = float(df["close"].iloc[-1])
                                     order = broker.sell(sym, p["quantity"], price)
                                     console.print(f"[green]卖单: {order}[/green]")
-                                    notifier.send_signal(sig)
+                                    if order.status == OrderStatus.FILLED:
+                                        pnl = (order.filled_price - p["avg_cost"]) * order.filled_qty - order.commission
+                                        risk.update_position(sym, -order.filled_qty, order.filled_price)
+                                        risk.record_daily_pnl(pnl)
+                                        notifier.send_signal(sig)
                                     break
 
-                        if risk.is_daily_loss_breached(broker.get_balance()["total_equity"]):
+                        equity_now = broker.get_balance(last_prices)["total_equity"]
+                        risk.update_peak(equity_now)
+                        if risk.is_daily_loss_breached(equity_now):
                             notifier.send_risk_alert("单日亏损触发熔断，暂停交易！")
+                            halted = True
+                            break
+                        if risk.is_drawdown_breached(equity_now):
+                            notifier.send_risk_alert("最大回撤触发熔断，暂停交易！")
+                            halted = True
                             break
 
                     except Exception as e:
                         logger.error(f"扫描 {sym} 失败: {e}")
+
+                if halted:
+                    break
 
             time.sleep(scan_interval)
 
@@ -459,7 +485,10 @@ def alpaca_paper(
     stop_loss_pct: float  = typer.Option(0.15,     help="ATR不可用时的固定止损比例"),
     atr_multiplier: float = typer.Option(2.5,      help="ATR止损倍数，止损价=买入价-N×ATR"),
     max_sector_pct: float = typer.Option(0.25,     help="行业集中度上限，如0.25表示每个行业不超过25%仓位"),
+    max_position_pct: float | None = typer.Option(None, help="单票仓位上限（默认取 config.settings.max_position_pct）"),
     force_rebalance: bool = typer.Option(False, "--force-rebalance/--no-force-rebalance", help="忽略日期检查，立即执行全量换仓"),
+    dry_run: bool = typer.Option(False, "--dry-run/--live", help="演练模式：只打分/计算，不向 Alpaca 提交任何订单"),
+    overdue_multiplier: float = typer.Option(1.5, help="调仓逾期多少倍 rebalance_days 后，即使未到ET收盘也强制执行"),
 ):
     """
     因子选股实盘 —— 通过 Alpaca Paper Trading API 执行真实（模拟）订单。
@@ -469,8 +498,16 @@ def alpaca_paper(
     _time.sleep(15)  # wait for network after launchd wake
 
     from paper_trading.alpaca_runner import AlpacaPaperRunner
+    from alert import Notifier
     from dotenv import load_dotenv
     load_dotenv()
+
+    if not Notifier().is_configured:
+        console.print(
+            "[bold yellow]⚠ 未配置 ALERT_EMAIL_* —— 被拒/部分成交订单和风控告警目前只会写入日志，"
+            "不会有任何人收到实际通知。这个命令通常由 launchd 无人值守运行，"
+            "建议在 .env 里配置 ALERT_EMAIL_FROM/TO/PASSWORD。[/bold yellow]"
+        )
 
     runner = AlpacaPaperRunner(
         universe=universe,
@@ -478,7 +515,10 @@ def alpaca_paper(
         rebalance_days=rebalance_days,
         stop_loss_pct=stop_loss_pct,
         atr_multiplier=atr_multiplier,
+        max_position_pct=max_position_pct,
+        dry_run=dry_run,
         max_sector_pct=max_sector_pct,
+        overdue_multiplier=overdue_multiplier,
     )
     report = runner.run(force_rebalance=force_rebalance)
 
@@ -489,6 +529,10 @@ def alpaca_paper(
         console.print(spy_str.rstrip())
     console.print(f"  当前持仓:  {report['holdings']} 只")
     console.print(f"  今日订单:  {report['trades']} 笔")
+    if report.get("deferred_rebalance"):
+        console.print("  [yellow]⏳ 已到调仓日，但未到ET收盘缓冲时间，本次仅完成止损检查，全量调仓推迟到下次运行[/yellow]")
+    if report.get("failed_orders"):
+        console.print(f"  [red]⚠ {report['failed_orders']} 笔订单被拒绝/取消，请检查 Alpaca 后台[/red]")
     if report["rebalanced"]:
         console.print("  [cyan]已调仓（评分加权）[/cyan]")
     else:
@@ -509,13 +553,18 @@ def alpaca_status():
         console.print("[red]没有日志文件，请先运行 alpaca-paper[/red]")
         return
 
-    # Read manually to handle mixed 6-column (old) and 7-column (new) rows
+    # Read manually to handle mixed 6/7/8-column rows (schema grew over time)
     rows = []
     with open(log_file, newline="") as f:
         reader = _csv.reader(f)
         header = next(reader)
         for row in reader:
-            if len(row) == 7:
+            if len(row) == 8:
+                rows.append(dict(zip(
+                    ["date","equity","spy_close","rebalanced","n_holdings","n_trades","holdings","failed_orders"],
+                    row
+                )))
+            elif len(row) == 7:
                 rows.append(dict(zip(
                     ["date","equity","spy_close","rebalanced","n_holdings","n_trades","holdings"],
                     row

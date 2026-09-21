@@ -62,12 +62,24 @@ _IC_WEIGHTS_PATH = Path("data/factor_weights.json")
 
 
 def _spearman(x: np.ndarray, y: np.ndarray) -> float:
-    """Spearman rank IC (numpy only, no scipy)."""
+    """Spearman rank IC (numpy only, no scipy). Ties get the average rank of their block —
+    plain argsort would hand identical values arbitrary distinct ranks, which biases IC
+    for exactly the factors most likely to saturate at the same clipped ±1 value across
+    many stocks (e.g. roe_score, growth_score)."""
     def _rank(a: np.ndarray) -> np.ndarray:
-        tmp = np.argsort(a)
-        r = np.empty_like(tmp, dtype=float)
-        r[tmp] = np.arange(len(a), dtype=float)
-        return r
+        order = np.argsort(a, kind="mergesort")
+        sorted_a = a[order]
+        ranks = np.empty(len(a), dtype=float)
+        i = 0
+        n = len(a)
+        while i < n:
+            j = i
+            while j + 1 < n and sorted_a[j + 1] == sorted_a[i]:
+                j += 1
+            avg_rank = (i + j) / 2.0
+            ranks[order[i:j + 1]] = avg_rank
+            i = j + 1
+        return ranks
 
     rx, ry = _rank(x), _rank(y)
     mx, my = rx.mean(), ry.mean()
@@ -252,6 +264,8 @@ class FactorEngine:
         delta = df["close"].diff().dropna().iloc[-period:]
         gain  = delta.clip(lower=0).mean()
         loss  = (-delta.clip(upper=0)).mean()
+        if gain == 0 and loss == 0:
+            return 0.0  # perfectly flat — no real signal, not a genuine overbought extreme
         rsi   = 100.0 if loss == 0 else 100.0 - 100.0 / (1 + gain / loss)
         return float(np.clip((50.0 - rsi) / 20.0, -1.0, 1.0))
 

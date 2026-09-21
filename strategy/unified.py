@@ -22,11 +22,13 @@ from typing import Optional
 
 import pandas as pd
 import numpy as np
+from loguru import logger
 
 from .base import BaseStrategy, Signal, SignalType
 from .momentum_shift import MomentumShiftStrategy
 from . import heatmap_trail
 from factor import FactorEngine
+from data import DataFetcher
 
 _VOTE = {SignalType.BUY: 1.0, SignalType.HOLD: 0.0, SignalType.SELL: -1.0}
 
@@ -66,17 +68,32 @@ class UnifiedStrategy(BaseStrategy):
         self._ms             = MomentumShiftStrategy()
         self._market_close: pd.Series | None = None
         self._score_history: list[dict] = []  # 存储历史分数用于风险平价
+        self._fetcher        = DataFetcher(use_cache=True)
+        self._fund_cache: dict[str, dict] = {}
 
     def set_market_data(self, market_close: pd.Series) -> None:
         self._market_close = market_close
 
-    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算所有需要的指标"""
+    def _get_fundamentals(self, symbol: str) -> dict:
+        """按 symbol 缓存基本面，避免每根 bar 重复调用（因子权重里ROE/成长/负债/PB合计~34%）。"""
+        if not symbol:
+            return {}
+        if symbol not in self._fund_cache:
+            try:
+                self._fund_cache[symbol] = self._fetcher.get_fundamentals(symbol)
+            except Exception as e:
+                logger.warning(f"{symbol}: fundamentals fetch raised unexpectedly, "
+                                f"scoring on technical factors only: {e}")
+                self._fund_cache[symbol] = {}
+        return self._fund_cache[symbol]
+
+    def compute_indicators(self, df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+        """计算所有需要的指标。symbol 留空时基本面因子（ROE/成长/负债/PB）不参与该预览列的计算。"""
         df = self._ms.compute_indicators(df)
-        
+
         # 预计算 factor scores（如果需要）
         if len(df) >= 60:
-            factor_data = self._engine.compute(df, "")
+            factor_data = self._engine.compute(df, symbol, fundamentals=self._get_fundamentals(symbol))
             df["factor_score"] = factor_data.total_score
         
         return df
@@ -105,13 +122,16 @@ class UnifiedStrategy(BaseStrategy):
             return False
         return float(series.iloc[-1]) < float(series.iloc[-250:].mean())
 
-    def _tv_score(self, symbol: str, interval: str = "1d") -> tuple[float, str]:
+    def _tv_score(self, symbol: str, interval: str = "1d") -> tuple[float, str, bool]:
+        """Returns (score, recommendation, ok). ok=False means the fetch failed —
+        callers must not treat that the same as a genuine neutral reading."""
         try:
             from data.tv_signals import get_tv_signal
             tv = get_tv_signal(symbol, interval=interval)
-            return float(tv["score"]), tv.get("recommendation", "NEUTRAL")
-        except Exception:
-            return 0.0, "NEUTRAL"
+            return float(tv["score"]), tv.get("recommendation", "NEUTRAL"), True
+        except Exception as e:
+            logger.warning(f"TV signal fetch failed for {symbol} ({interval}): {e}")
+            return 0.0, "NEUTRAL", False
 
     # ── 风险平价权重调整 ──────────────────────────────────────────────────────
 
@@ -178,7 +198,7 @@ class UnifiedStrategy(BaseStrategy):
 
         # 1. Factor score  (-1 ~ +1)
         try:
-            fs = self._engine.compute(df, symbol)
+            fs = self._engine.compute(df, symbol, fundamentals=self._get_fundamentals(symbol))
             factor_score = fs.total_score
             factor_reason = fs.reason
             factor_grade = fs.grade
@@ -221,19 +241,23 @@ class UnifiedStrategy(BaseStrategy):
             ms_score = 0.0
 
         # 4. TradingView score (实盘才有)
-        tv_score, tv_daily_rec, tv_weekly_rec = 0.0, "NEUTRAL", "NEUTRAL"
+        tv_score, tv_daily_rec, tv_weekly_rec, tv_daily_ok = 0.0, "NEUTRAL", "NEUTRAL", False
         if self.use_tv:
-            tv_score, tv_daily_rec = self._tv_score(symbol, "1d")
-            _, tv_weekly_rec = self._tv_score(symbol, "1w")
+            tv_score, tv_daily_rec, tv_daily_ok = self._tv_score(symbol, "1d")
+            _, tv_weekly_rec, tv_weekly_ok = self._tv_score(symbol, "1w")
+            if not tv_weekly_ok:
+                tv_weekly_rec = "NEUTRAL"  # can't confirm bearish → don't block buys on missing data
             tv_score = max(-1.0, min(1.0, tv_score))  # 确保在 [-1,1] 范围
 
         # 5. 风险平价权重调整（可选）
+        # tv 取信失败时不计入分数混合——否则一次 API 抖动会把 tv_score=0.0 当成真实中性
+        # 信号注入加权平均，悄悄拉低综合分。
         current_scores = {
             "factor": factor_score,
             "heatmap": hm_score,
             "ms": ms_score,
         }
-        if self.use_tv:
+        if self.use_tv and tv_daily_ok:
             current_scores["tv"] = tv_score
         
         # 存储历史（用于风险平价计算）
@@ -251,8 +275,8 @@ class UnifiedStrategy(BaseStrategy):
             ms_score * risk_weights.get("ms", self.ms_weight)
         )
         
-        effective_tv_w = risk_weights.get("tv", self.tv_weight if self.use_tv else 0)
-        if self.use_tv and effective_tv_w > 0:
+        effective_tv_w = risk_weights.get("tv", self.tv_weight if self.use_tv else 0) if tv_daily_ok else 0.0
+        if self.use_tv and tv_daily_ok and effective_tv_w > 0:
             total_score += tv_score * effective_tv_w
             total_weight = sum(risk_weights.values())
         else:
@@ -347,5 +371,6 @@ class UnifiedStrategy(BaseStrategy):
     def reset(self) -> None:
         """重置策略状态（用于新的回测）"""
         self._score_history = []
+        self._fund_cache = {}
         if hasattr(self._engine, 'reset'):
             self._engine.reset()

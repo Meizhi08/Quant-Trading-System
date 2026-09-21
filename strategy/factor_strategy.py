@@ -15,9 +15,11 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
+from loguru import logger
 
 from .base import BaseStrategy, Signal, SignalType
 from factor import FactorEngine
+from data import DataFetcher
 
 
 class FactorStrategy(BaseStrategy):
@@ -37,6 +39,23 @@ class FactorStrategy(BaseStrategy):
         self.sell_threshold = sell_threshold
         self._engine = FactorEngine(weights=weights)
         self._market_close: pd.Series | None = None  # S&P 500 close price for market filter
+        self._fetcher = DataFetcher(use_cache=True)
+        self._fund_cache: dict[str, dict] = {}
+
+    def _get_fundamentals(self, symbol: str) -> dict:
+        """按 symbol 缓存基本面，避免每根 bar 重复调用（因子权重里ROE/成长/负债/PB合计~34%）。"""
+        if not symbol:
+            return {}
+        if symbol not in self._fund_cache:
+            try:
+                self._fund_cache[symbol] = self._fetcher.get_fundamentals(symbol)
+            except Exception as e:
+                # DataFetcher.get_fundamentals() already logs+degrades internally and
+                # shouldn't raise; this is a defensive second layer in case it does.
+                logger.warning(f"{symbol}: fundamentals fetch raised unexpectedly, "
+                                f"scoring on technical factors only: {e}")
+                self._fund_cache[symbol] = {}
+        return self._fund_cache[symbol]
 
     def set_market_data(self, market_close: pd.Series) -> None:
         """Inject S&P 500 close price series for broad market trend filtering."""
@@ -63,7 +82,7 @@ class FactorStrategy(BaseStrategy):
         return float(series.iloc[-1]) < float(ma250)
 
     def generate_signal(self, df: pd.DataFrame, symbol: str) -> Signal:
-        fs = self._engine.compute(df, symbol)
+        fs = self._engine.compute(df, symbol, fundamentals=self._get_fundamentals(symbol))
         score = fs.total_score
         price = float(df["close"].iloc[-1])
         last_date = df.index[-1]

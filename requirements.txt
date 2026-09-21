@@ -9,14 +9,22 @@ apscheduler==3.10.4
 # Data
 akshare>=1.16.72
 tushare==1.4.17
+yfinance>=0.2.40
 pandas==2.1.4
 numpy==1.26.3
+scipy>=1.11.4
 requests==2.31.0
 pyarrow==14.0.2
 
 # Backtest
 backtrader==1.9.78.123
 empyrical==0.5.5
+
+# Broker (Alpaca paper trading)
+alpaca-py>=0.33.0
+
+# TradingView aggregated technical-analysis signal
+tradingview-ta>=3.3.0
 
 # Visualization
 plotly==5.18.0

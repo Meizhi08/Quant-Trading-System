@@ -70,8 +70,8 @@ class BrokerBase(ABC):
         """获取当前持仓。"""
 
     @abstractmethod
-    def get_balance(self) -> dict:
-        """获取账户资金信息（cash / market_value / total_equity）。"""
+    def get_balance(self, prices: dict[str, float] | None = None) -> dict:
+        """获取账户资金信息（cash / market_value / total_equity）。prices 用于按市价重估持仓。"""
 
     @abstractmethod
     def get_today_orders(self) -> list[Order]:

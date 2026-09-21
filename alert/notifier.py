@@ -35,6 +35,14 @@ class Notifier:
         self._smtp_port  = getattr(settings, "alert_email_port", 587)
         self._email_enabled = bool(self._email_from and self._email_to and self._email_pw)
 
+    @property
+    def is_configured(self) -> bool:
+        """False means send_risk_alert()/send_signal() will silently no-op (return
+        False, no exception) — nothing actually reaches anyone. Callers that run
+        unattended (launchd) should check this once at startup and warn loudly,
+        rather than let the operator find out only after an alert never arrived."""
+        return self._email_enabled
+
     def send_signal(self, signal: Signal) -> bool:
         tag = _EMOJI[signal.signal]
         title = f"{tag} [{signal.strategy}] {signal.symbol} @ {signal.price:.2f}"

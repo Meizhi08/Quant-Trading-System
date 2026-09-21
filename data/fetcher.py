@@ -48,7 +48,7 @@ class DataFetcher:
         """
         if self.cache:
             cached = self.cache.get("kline", symbol=symbol, start=start,
-                                    end=end, period=period)
+                                    end=end, period=period, adjust=adjust)
             if cached is not None:
                 return cached
 
@@ -59,7 +59,7 @@ class DataFetcher:
                 start=start,
                 end=end,
                 interval=period,
-                auto_adjust=True,   # adjusts for splits and dividends
+                auto_adjust=(adjust == "auto"),   # honor the caller's choice
                 progress=False,
             )
         except Exception as e:
@@ -77,12 +77,25 @@ class DataFetcher:
         df.columns = [c.lower() for c in df.columns]
         df.index = pd.to_datetime(df.index).tz_localize(None)
         df.index.name = "date"
+        raw_len = len(df)
         df = df[["open", "high", "low", "close", "volume"]].dropna()
         df = df.sort_index()
+        dropped = raw_len - len(df)
 
         if self.cache:
-            self.cache.set(df, "kline", symbol=symbol, start=start,
-                           end=end, period=period)
+            # A rate-limited/partial yfinance response can silently come back with most
+            # rows NaN; dropna() above then hands us a "clean-looking" but gappy result.
+            # Caching that as-is would serve permanently-incomplete history for the full
+            # TTL window. Only cache when the drop rate is small enough to plausibly be
+            # normal (e.g. a genuine early-listing/holiday gap) rather than a bad fetch.
+            if raw_len > 0 and dropped / raw_len > 0.05:
+                logger.warning(
+                    f"{symbol}: dropped {dropped}/{raw_len} rows with missing OHLCV "
+                    "fields — result looks like a partial/rate-limited fetch, not caching"
+                )
+            else:
+                self.cache.set(df, "kline", symbol=symbol, start=start,
+                               end=end, period=period, adjust=adjust)
         return df
 
     def get_realtime(self, symbols: list[str]) -> pd.DataFrame:
@@ -147,7 +160,9 @@ class DataFetcher:
             result = {}
 
         if self.cache and result:
-            # Cache fundamentals for 24h
+            # Shares the same TTL as kline (self.cache is one DataCache instance, ttl
+            # set in __init__) — actually 6h, not 24h; fundamentals change slowly so this
+            # just means more refetches than strictly necessary, not a staleness risk.
             self.cache.set(result, "fundamentals", symbol=symbol)  # type: ignore
         return result
 

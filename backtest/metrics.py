@@ -67,11 +67,15 @@ class BacktestMetrics:
         excess = returns - risk_free / trading_days
         sharpe = float(excess.mean() / excess.std() * np.sqrt(trading_days)) if excess.std() else 0
 
-        # Sortino
-        downside = returns[returns < 0]
+        # Sortino — downside deviation must be computed over ALL N periods (shortfall
+        # below the target floored at 0), not std() of just the losing-day subset, which
+        # is a different (non-standard, inconsistently-scaled) statistic.
+        target = risk_free / trading_days
+        downside_diff = (returns - target).clip(upper=0)
+        downside_dev = float(np.sqrt((downside_diff ** 2).mean()))
         sortino = float(
-            excess.mean() / downside.std() * np.sqrt(trading_days)
-        ) if len(downside) > 0 and downside.std() > 0 else 0
+            excess.mean() / downside_dev * np.sqrt(trading_days)
+        ) if downside_dev > 0 else 0
 
         # Calmar
         calmar = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0

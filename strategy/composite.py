@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
+from loguru import logger
 
 from .base import BaseStrategy, Signal, SignalType
 from .ma_cross import MACrossStrategy
@@ -71,20 +72,23 @@ class CompositeStrategy(BaseStrategy):
     def set_live_mode(self, live: bool = True) -> None:
         self.use_tv = live
 
-    def _tv_vote(self, symbol: str, interval: str = "1d") -> tuple[SignalType, float]:
-        """Fetch TradingView signal for a given timeframe."""
+    def _tv_vote(self, symbol: str, interval: str = "1d") -> tuple[SignalType, float, bool]:
+        """Fetch TradingView signal for a given timeframe.
+        Returns (signal, score, ok) — ok=False means the fetch failed, which callers
+        must not silently treat as a genuine neutral reading."""
         try:
             from data.tv_signals import get_tv_signal
             tv = get_tv_signal(symbol, interval=interval)
             score = tv["score"]
             if score >= 0.5:
-                return SignalType.BUY, score
+                return SignalType.BUY, score, True
             elif score <= -0.5:
-                return SignalType.SELL, score
+                return SignalType.SELL, score, True
             else:
-                return SignalType.HOLD, score
-        except Exception:
-            return SignalType.HOLD, 0.0
+                return SignalType.HOLD, score, True
+        except Exception as e:
+            logger.warning(f"TV signal fetch failed for {symbol} ({interval}): {e}")
+            return SignalType.HOLD, 0.0, False
 
     def generate_signal(self, df: pd.DataFrame, symbol: str) -> Signal:
         votes: list[tuple[str, SignalType, float]] = []
@@ -97,12 +101,19 @@ class CompositeStrategy(BaseStrategy):
         tv_weekly_sig = SignalType.HOLD
 
         if self.use_tv and self._tv_weight > 0:
-            # Daily TV vote — counts toward score
-            tv_daily_sig, tv_raw_score = self._tv_vote(symbol, "1d")
-            votes.append(("TV_daily", tv_daily_sig, self._tv_weight))
+            # Daily TV vote — counts toward score, but only if the fetch actually
+            # succeeded. A failed fetch used to fall back to (HOLD, 0.0), which was
+            # indistinguishable from a genuine neutral reading and silently dragged
+            # the weighted score toward 0 on every API hiccup.
+            tv_daily_sig, tv_raw_score, tv_daily_ok = self._tv_vote(symbol, "1d")
+            if tv_daily_ok:
+                votes.append(("TV_daily", tv_daily_sig, self._tv_weight))
 
-            # Weekly TV confirmation — does NOT add weight, only blocks false signals
-            tv_weekly_sig, _ = self._tv_vote(symbol, "1w")
+            # Weekly TV confirmation — does NOT add weight, only blocks false signals.
+            # A failed fetch here must not block buys (we can't confirm bearish).
+            tv_weekly_sig, _, tv_weekly_ok = self._tv_vote(symbol, "1w")
+            if not tv_weekly_ok:
+                tv_weekly_sig = SignalType.HOLD
 
         total_w = sum(w for _, _, w in votes)
         score   = sum(_VOTE[s] * w for _, s, w in votes) / total_w

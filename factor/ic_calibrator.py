@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -54,11 +55,19 @@ class ICCalibrator:
     def _factor_values(
         self, sym: str, df: pd.DataFrame, end_idx: int
     ) -> dict[str, float] | None:
-        """Compute all 12 factor scores for `sym` using data up to end_idx (exclusive)."""
+        """
+        Compute all 12 factor scores for `sym` using data up to and including end_idx
+        ("today"). Must be INCLUSIVE of end_idx to match live compute(), which always
+        scores using the latest available bar — the forward return below is anchored on
+        today's close (df.iloc[end_idx]) as the entry price, so factors computed on data
+        that stops at end_idx-1 would be one day stale relative to what live trading
+        actually sees, muting IC for fast-reacting factors (momentum_5, rsi_score,
+        price_position).
+        """
         window = 120
-        if end_idx < window:
+        if end_idx < window - 1:
             return None
-        slice_df = df.iloc[end_idx - window: end_idx]
+        slice_df = df.iloc[end_idx - window + 1: end_idx + 1]
         if len(slice_df) < 60:
             return None
         fund = self.fund_map.get(sym, {})
@@ -200,5 +209,9 @@ class ICCalibrator:
             "mean_ic":      {k: round(v, 4) for k, v in mean_ic.items()},
             "calibrated_at": str(pd.Timestamp.now().date()),
         }
-        _IC_WEIGHTS_PATH.write_text(json.dumps(payload, indent=2))
+        # Atomic write — this file is read by every live FactorEngine at startup,
+        # a crash mid-write must never leave it truncated/unparseable.
+        tmp_path = _IC_WEIGHTS_PATH.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2))
+        os.replace(tmp_path, _IC_WEIGHTS_PATH)
         logger.info(f"Saved calibrated weights → {_IC_WEIGHTS_PATH}")

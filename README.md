@@ -35,7 +35,25 @@ Weights are calibrated via rolling **Rank IC** — factors with higher recent pr
 | Vol Trend | 3% | Volume | Volume momentum |
 | Momentum 5d | -3% | Mean revert | Short term reversal (contrarian) |
 
-**Constraints:** sector concentration capped at 25% per GICS sector share class deduplication (e.g. GOOG/GOOGL) score proportional position sizing
+**Constraints:** sector concentration capped at 25% per GICS sector (and a per-symbol cap, default 30% of equity) · share class deduplication (e.g. GOOG/GOOGL) · score proportional position sizing
+
+**When a cap can't be honored while staying fully invested** (e.g. the day's top scorers cluster too heavily in one sector, or a reduced bear-market book doesn't have enough sector-diverse candidates left over): the system holds the un-placeable fraction as cash rather than either breaching the cap or force-filling with lower-scored, less-diverse names. This is a deliberate choice — respecting the risk limit takes priority over staying fully deployed. It means the strategy can under-invest relative to a version that ignored the cap; a "reduce position count instead of holding cash" or "force diversity earlier in stock selection" variant would have different risk/return tradeoffs and hasn't been implemented.
+
+**Unattended operation:** `alpaca-paper` is designed to run once per trading day after market close (see `setup_cron.sh`/launchd). If a rebalance is due but it's before 16:15 ET, it **defers only the full rebalance** (which needs a completed day's factor scores) and logs a warning — the ATR stop-loss check on current holdings still runs that same cycle regardless. `--force-rebalance` bypasses the deferral for manual runs. If a machine's wake pattern means it only ever catches up before close (e.g. it sleeps every evening), the guard backs off once a rebalance is more than `rebalance_days × overdue_multiplier` days overdue (`--overdue-multiplier`, default 1.5 — **a multiple of `rebalance_days`, not a fixed day count**: with `--rebalance-days 7` the threshold is 10.5 days, not 45) and forces the full rebalance through anyway rather than postponing indefinitely — universe/SPY data fetches always cut off at the most recently *completed* session in that case (see `_last_completed_session_cutoff()`), never a still-in-progress one.
+
+**Two different "current price" sources, on purpose:** the ATR stop-loss check compares against Alpaca's own live position data (`client.get_all_positions()`'s `unrealized_plpc`, marked to Alpaca's latest quote during market hours) — it can react intraday. The factor scores driving a full rebalance are computed from `yfinance` daily bars as of the last **completed** session — they only update once a day, after close. This is why the two checks can be decoupled the way they are above: the stop-loss's price input is already close to real-time regardless of when in the day it runs; the rebalance's score input is not.
+
+Order-rejection and risk alerts go out via `alert/notifier.py`, which is a **no-op** unless `ALERT_EMAIL_FROM/TO/PASSWORD` are set in `.env` — **the command still runs and still trades even if notifications aren't configured**; it just means failures only ever reach the log file, not a person. `alpaca-paper` prints a warning at startup if this is the case, but does not refuse to run — decide deliberately whether that's acceptable for your setup rather than relying on the printed warning to catch it every time.
+
+`--dry-run` scores and sizes a full rebalance without submitting any orders, for testing changes safely.
+
+**First-time deployment check:** before trusting this to launchd, verify the environment end-to-end once, manually:
+```bash
+pip install -r requirements.txt
+# .env needs ALPACA_API_KEY / ALPACA_SECRET_KEY (and ALERT_EMAIL_* if you want real alerts)
+python main.py alpaca-paper --dry-run --force-rebalance
+```
+This exercises the full scoring → constraint → sizing pipeline against your real environment and credentials without placing any orders. `tests/test_regression.py` (unit-level, no network) is not a substitute for this — it doesn't verify dependencies are installed correctly or that `.env` is readable.
 
 ## 10-Year Out-of-Sample Backtest (2015–2026, 497 stocks)
 
@@ -47,6 +65,8 @@ Weights are calibrated via rolling **Rank IC** — factors with higher recent pr
 | **Total (compounded)** | +211.2% | +309.4% | -98.2% | | |
 
 Rebalance: every 20 trading days SPY 200day MA bear-market filter Transaction cost: 0.1% per side
+
+**Known limitation — survivorship bias:** the universe is built from the *current* S&P 500 constituent list applied across the entire 2015–2026 window (`data/stock_selector.py::get_sp500_symbols`). Stocks that were removed or delisted before today never appear in the backtest at any point in their history, and stocks that joined the index recently are backtested as if held since 2015. **This means the returns/Sharpe/alpha above are an optimistic upper bound: live trading should be expected to underperform this backtest, direction only — the exact magnitude has not been quantified** (doing so would require rerunning the backtest against a point-in-time historical constituent list, which we don't have a reliable free source for).
 
 ### Why Period 2 Underperformed and What Changed
 
@@ -60,6 +80,7 @@ The SPY 200 day MA filter correctly moved to cash during the 2018 and 2020 crash
 - **Factor engine:** `pandas`, `numpy`, `scipy`
 - **Scheduling:** macOS `launchd` daemon
 - **Dashboard:** TradingView Lightweight Charts (self contained HTML)
+- **Signal confirmation:** TradingView aggregated technical rating (`tradingview-ta`, `data/tv_signals.py`) — used by `composite`/`unified` strategies in live signal generation (`main.py live`/`signal`/`scan`), not by the factor scan/backtest paths below. It's an unofficial scraping-based API with no documented rate limit; keep watchlists passed to `scan --symbols` to a reasonable size (tens, not hundreds) rather than the full S&P 500 universe.
 - **Risk report:** CAPM regression, Sharpe, Sortino, max drawdown
 
 ## Key Commands
