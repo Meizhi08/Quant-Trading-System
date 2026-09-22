@@ -47,13 +47,17 @@ Order-rejection and risk alerts go out via `alert/notifier.py`, which is a **no-
 
 `--dry-run` scores and sizes a full rebalance without submitting any orders, for testing changes safely.
 
-**First-time deployment check:** before trusting this to launchd, verify the environment end-to-end once, manually:
+**First-time deployment check:** before trusting this to launchd, verify the environment end-to-end once, manually — **using the same Python interpreter launchd will actually use** (check `ProgramArguments[0]` in the `.plist`; on macOS this is often the Xcode Command Line Tools' bundled Python, e.g. `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3`, not whatever `python`/`python3` resolves to in an interactive shell — a conda `base` env or a separately-installed newer Python will silently diverge from what runs unattended):
 ```bash
+# Recommended: a dedicated env matching launchd's interpreter version, so `python`
+# resolves correctly without touching conda base or needing the full interpreter path
+conda create -n quant-trading python=3.9 -y
+conda activate quant-trading
 pip install -r requirements.txt
 # .env needs ALPACA_API_KEY / ALPACA_SECRET_KEY (and ALERT_EMAIL_* if you want real alerts)
 python main.py alpaca-paper --dry-run --force-rebalance
 ```
-This exercises the full scoring → constraint → sizing pipeline against your real environment and credentials without placing any orders. `tests/test_regression.py` (unit-level, no network) is not a substitute for this — it doesn't verify dependencies are installed correctly or that `.env` is readable.
+This exercises the full scoring → constraint → sizing pipeline against your real environment and credentials without placing any orders. `tests/test_regression.py` (unit-level, no network) is not a substitute for this — it doesn't verify dependencies are installed correctly or that `.env` is readable. `--dry-run` also skips writing to `alpaca_paper_log.csv` / `alpaca_last_run.txt` — a dry run must never affect whether the next real run considers a rebalance already done.
 
 ## 10-Year Out-of-Sample Backtest (2015–2026, 497 stocks)
 

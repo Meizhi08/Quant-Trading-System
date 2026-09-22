@@ -625,23 +625,29 @@ class AlpacaPaperRunner:
     ) -> list[dict]:
         # Cancel pending BUY orders so stale buys don't interfere.
         # Leave pending SELL orders intact — they free up capital we need.
-        try:
-            from alpaca.trading.enums import OrderSide, QueryOrderStatus
-            from alpaca.trading.requests import GetOrdersRequest
-            open_orders = self.client.get_orders(
-                GetOrdersRequest(status=QueryOrderStatus.OPEN)
-            )
-            for order in open_orders:
-                if order.side == OrderSide.BUY:
-                    self.client.cancel_order_by_id(order.id)
-            buy_count = sum(1 for o in open_orders if o.side == OrderSide.BUY)
-            if buy_count:
-                logger.info(f"Cancelled {buy_count} pending buy orders before rebalance")
-        except Exception as e:
-            logger.warning(f"Could not cancel pending buy orders: {e}")
+        # This mutates real broker state, so it must not run in dry-run mode.
+        if not self.dry_run:
+            try:
+                from alpaca.trading.enums import OrderSide, QueryOrderStatus
+                from alpaca.trading.requests import GetOrdersRequest
+                open_orders = self.client.get_orders(
+                    GetOrdersRequest(status=QueryOrderStatus.OPEN)
+                )
+                for order in open_orders:
+                    if order.side == OrderSide.BUY:
+                        self.client.cancel_order_by_id(order.id)
+                buy_count = sum(1 for o in open_orders if o.side == OrderSide.BUY)
+                if buy_count:
+                    logger.info(f"Cancelled {buy_count} pending buy orders before rebalance")
+            except Exception as e:
+                logger.warning(f"Could not cancel pending buy orders: {e}")
 
-        _REBALANCE_MARKER.parent.mkdir(exist_ok=True)
-        _REBALANCE_MARKER.write_text(datetime.now().isoformat())
+        # The marker exists to detect a REAL rebalance that got killed mid-flight; a
+        # dry run never touches real positions, so it must not leave one behind for the
+        # next real run to trip over.
+        if not self.dry_run:
+            _REBALANCE_MARKER.parent.mkdir(exist_ok=True)
+            _REBALANCE_MARKER.write_text(datetime.now().isoformat())
 
         # Bear-market defensive rule: SPY below its 200-day MA → hold only the top half
         # of positions and invest just 50% of equity, leaving the rest in cash.
@@ -819,8 +825,13 @@ class AlpacaPaperRunner:
             "failed_orders": failed_orders,
             "deferred_rebalance": deferred_rebalance,
         }
-        self._save_log(report, positions, trades)
-        _LAST_RUN_PATH.write_text(datetime.now().isoformat())
+        if self.dry_run:
+            logger.info("[DRY-RUN] not writing to alpaca_paper_log.csv / alpaca_last_run.txt — "
+                        "a dry run must not affect whether the next real run considers a "
+                        "rebalance already done")
+        else:
+            self._save_log(report, positions, trades)
+            _LAST_RUN_PATH.write_text(datetime.now().isoformat())
         return report
 
     # ── Logging ───────────────────────────────────────────────────────────────
