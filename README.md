@@ -89,20 +89,31 @@ The SPY 200 day MA filter correctly moved to cash during the 2018 and 2020 crash
 
 ## Key Commands
 
+Run from the project root with the `quant-trading` conda env active — the system/base python is missing dependencies (`loguru`, etc.), so bare `python main.py ...` only works after `conda activate quant-trading`:
+
 ```bash
-# Run daily rebalance / stop-loss check
+cd Quant-Trading-System
+conda activate quant-trading
+
+# Daily rebalance / stop-loss check (needs ALPACA_API_KEY / ALPACA_SECRET_KEY in .env)
 python main.py alpaca-paper
 
-# Force full rebalance today
+# Force full rebalance today / score & size without submitting orders
 python main.py alpaca-paper --force-rebalance
+python main.py alpaca-paper --dry-run
 
-# Generate performance dashboard
+# Portfolio status & daemon health (local log only, no network, no credentials)
+python main.py alpaca-status
+python main.py alpaca-health
+
+# Performance dashboard (needs ≥2 days of alpaca-paper logs; --no-open skips the browser)
 python main.py alpaca-dashboard
 
-# Risk report (CAPM alpha/beta, Sharpe, Sortino, drawdown)
+# Risk report — CAPM alpha/beta, Sharpe, Sortino, drawdown (needs ≥5 days of logs)
 python main.py risk-report
 
-# 10-year backtest
-python main.py factor-backtest --start 2015-01-01 --end 2026-01-01
+# 10-year backtest, full S&P 500 universe like the table above (~20-30 min);
+# drop --no-sample for a faster 80-stock sampled run
+python main.py factor-backtest --start 2015-01-01 --end 2026-01-01 --no-sample
 ```
 
